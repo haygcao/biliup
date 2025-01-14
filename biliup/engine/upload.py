@@ -1,18 +1,16 @@
 import logging
 import os
+import pathlib
 import shutil
-import subprocess
-import json
-import time
 
-from functools import reduce
-from pathlib import Path
 from typing import NamedTuple, Optional, List
 
-from biliup.common.tools import NamedLock
+from sqlalchemy import desc
+
+from biliup.common.tools import NamedLock, get_file_create_timestamp
 from biliup.config import config
-from biliup.uploader import fmt_title_and_desc
-from biliup.database import DB as db
+from biliup.database import models
+from biliup.database.db import SessionLocal
 
 logger = logging.getLogger('biliup')
 
@@ -35,12 +33,22 @@ class UploadBase:
 
         # 获取文件列表
         file_list = []
+        # 数据库中保存的文件名, 不含后缀
+        save = []
+        with SessionLocal() as db:
+            dbinfo = db.query(models.StreamerInfo).filter(models.StreamerInfo.name == index).order_by(
+                desc(models.StreamerInfo.id)).first()
+            if dbinfo:
+                for dbfile in dbinfo.filelist:
+                    save.append(dbfile.file)
         for file_name in os.listdir('.'):
-            if index in file_name and os.path.isfile(file_name):
+            # 可能有两层后缀.with_suffix('')去掉一层.stem取文件名
+            if (index in file_name or pathlib.Path(file_name).with_suffix('').stem in save ) and os.path.isfile(file_name):
                 file_list.append(file_name)
         if len(file_list) == 0:
             return []
-        file_list = sorted(file_list, key=lambda x: os.path.getctime(x))
+
+        file_list = sorted(file_list, key=lambda x: get_file_create_timestamp(x))
 
         # 正在上传的文件列表
         upload_filename: list = event_manager.context['upload_filename']
@@ -131,9 +139,6 @@ class UploadBase:
                     event_manager.context['upload_filename'].extend(upload_filename_list)
                 lock.release()
                 file_list = self.upload(file_list)
-                if db.delete_stream_info_by_date(self.principal, self.data.get('date')) == 0:
-                    # 如果按开播时间删除失败，则尝试按照 streamer 删除
-                    db.delete_stream_info(self.principal)
                 return file_list
         finally:
             with NamedLock('upload_filename'):
